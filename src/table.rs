@@ -130,8 +130,8 @@ impl<'a, K:'a + Hash + Eq, V: 'a> Table<K, V> {
                                     Ordering::Relaxed,
                                     guard
                                 ){
-                                    Ok(e) => { 
-                                        let old_entry = unsafe{ ptr::read(&*e.as_raw()) };
+                                    Ok(_) => { 
+                                        let old_entry = unsafe{ ptr::read(&*bucket.as_raw()) };
                                         match old_entry.into_value() {
                                             Ok(v) => { return Some(v); },
                                             Err(_) => { return None; }
@@ -184,8 +184,8 @@ impl<'a, K:'a + Hash + Eq, V: 'a> Table<K, V> {
                                 Ordering::Relaxed,
                                 guard
                                 ){
-                                Ok(e) => {
-                                    let old_entry = unsafe{ ptr::read(&*e.as_raw()) };
+                                Ok(_) => {
+                                    let old_entry = unsafe{ ptr::read(&*bucket.as_raw()) };
                                     return old_entry.into_value();
                                 },
                                 Err(_) => { continue; }
