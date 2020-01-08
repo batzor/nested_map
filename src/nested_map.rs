@@ -30,7 +30,19 @@ pub struct NestedMap<K: Hash + Eq, V> {
     root: Table<K, V>,
 }
 
+impl<'a, K: 'a + Hash + Eq, V: 'a> Default for NestedMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a, K:'a + Hash + Eq, V> NestedMap<K, V> {
+    pub fn new() -> Self {
+        Self {
+            root: Table::default()
+        }
+    }
+
     /// Lookups a key.
     pub fn lookup(&'a self, key: &K, guard: &'a Guard) -> Option<&V>
     {
