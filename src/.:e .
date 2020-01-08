@@ -1,0 +1,168 @@
+use std::hash::Hash;
+use std::sync::atomic::Ordering;
+
+use arr_macro::arr;
+use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
+
+use crate::sponge::Sponge;
+
+pub struct Entry<K: Hash + Eq, V> {
+    pub key: K,
+    pub value: Option<V>,
+}
+
+pub enum Bucket<K: Hash + Eq, V> {
+    Leaf(Entry<K, V>),
+    Branch(Table<K, V>),
+}
+
+/// A table which constructs the NestedHashMap.
+pub struct Table<K: Hash + Eq, V> {
+    /// The buckets in the table.
+    buckets: [Atomic<Bucket<K, V>>; 256],
+}
+
+impl<'a, K:'a + Hash + Eq, V: 'a> Table<K, V> {
+    /// Create a table containing two particular entries.
+    fn with_two_entries(
+        entry1: Shared<'a, Bucket<K, V>>, sponge1: Sponge,
+        entry2: Shared<'a, Bucket<K, V>>, sponge2: Sponge,
+    ) -> Self {
+        let table = Table::default();
+
+        // Squeeze the two sponges.
+        let idx1 = sponge1.squeeze();
+        let idx2 = sponge2.squeeze();
+
+        if idx1 != idx2 {
+            // If it doesn't collide, insert the two entries
+            table.buckets[idx1].store(entry1, Ordering::Relaxed);
+            table.buckets[idx2].store(entry2, Ordering::Relaxed);
+        } else {
+            // The two positions from the sponge matched, so we must place another branch.
+            table.buckets[idx1 as usize] = Atomic::new(Bucket::Branch(
+                Table::with_two_entries(entry1, sponge1, entry2, sponge2)
+            ));
+        }
+
+        table
+    }
+
+    /// Get the value associated with some key, given its sponge.
+    pub fn lookup<F, R>(&self, key: &K, sponge: Sponge, guard: &Guard, f: F) -> R
+    where 
+        F: FnOnce(Option<&V>) -> R
+    {
+        let bucket = self.buckets[sponge.squeeze() as usize].load(Ordering::Relaxed, guard);
+
+        match bucket.as_ref() {
+            None => { f(None) },
+            Some(Bucket::Leaf(Entry{key: k, value: val})) => {
+                if key == k { f(val) }
+                else { f(None) }
+            },
+            Some(Bucket::Branch(table)) => {
+                // The bucket is a branch with another table, so we recurse and look up in said
+                // sub-table.
+                table.lookup(key, sponge)
+            }
+        }
+    }
+
+    /// Insert a key-value pair into the table, given its sponge.
+    ///
+    /// - Returns `Ok(())` if `value` is inserted.
+    /// - Returns `Err(value)` for the given `value` if `key` is already occupied.
+    pub fn insert(&self, entry: Entry<K, V>, sponge: Sponge, guard: &Guard) -> Result<(), &V> {
+        let index = sponge.squeeze();
+        loop {
+            // We squeeze the sponge to get the right bucket of our table
+            let bucket = self.buckets[index].load(Ordering::Relaxed, guard);
+
+            match bucket.as_ref() {
+                None => {
+                    // Try to CAS if bucket is empty
+                    match self.buckets[index].compare_and_set(
+                        bucket,
+                        Owned::new(Bucket::Leaf(entry)),
+                        Ordering::Relaxed
+                    ) {
+                        Ok(_) => { return Ok(()); },
+                        Err((_, _)) => { continue; }
+                    };
+                }
+                Some(Bucket::Branch(table)) => { return table.insert(entry, sponge, guard); },
+                Some(bucket_) => {
+                    match bucket_ {
+                        Bucket::Branch(table) => {
+                            return table.insert(entry, sponge, guard);
+                        },
+                        Bucket::Leaf(entry2) =>  {
+                            if entry.key == entry2.key {
+                                return Err(entry2.value.unwrap());
+                            }else{
+                                let sponge2 = Sponge::new(&entry2.key);
+                                sponge2.matching(&sponge);
+                                let new_table = Table::with_two_entries(
+                                    Owned::new(Bucket::Leaf(entry)).into_shared(guard), sponge,
+                                    bucket, sponge2
+                                    );
+
+                                match self.buckets[index].compare_and_set(
+                                    bucket,
+                                    Owned::new(Bucket::Branch(new_table)),
+                                    Ordering::Release,
+                                    Ordering::Relaxed
+                                ){
+                                    Ok(_) => { return Ok(()); },
+                                    Err(_) => { continue; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn delete(&self, key: &K, sponge: Sponge, guard: &Guard) -> Result<V, ()> {
+        let index = sponge.squeeze();
+        loop {
+            let bucket = self.buckets[index].load(Ordering::Relaxed, guard);
+            match bucket.as_ref() {
+                None => { return Err(()); },
+                Some(bucket_) => { 
+                    match bucket_ {
+                        Bucket::Branch(table) => {
+                            return table.delete(key, sponge, guard);
+                        },
+                        Bucket::Leaf(entry) => {
+                            if key == entry.key {
+                                match self.buckets[index].compare_and_set(
+                                    bucket,
+                                    Shared::null(),
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed
+                                    ){
+                                    Ok(ptr) => {
+                                        return Ok(ptr.into_owned().value);
+                                    },
+                                    Err(_) => { continue; }
+                                }
+                            }    
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<K: Hash + Eq, V> Default for Table<K, V> {
+    fn default() -> Self {
+        Self {
+            buckets: arr![Atomic::null(); 256],
+        }
+    }
+}
+
