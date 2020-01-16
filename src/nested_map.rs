@@ -18,34 +18,34 @@
 //! See [this blog post](https://ticki.github.io/blog/an-atomic-hash-table/)
 //! for details.
 
-use std::hash::Hash;
 use crossbeam_epoch::{Guard, Owned};
+use std::fmt::Display;
+use std::hash::Hash;
 
-use crate::table::{Entry, Bucket, Table};
 use crate::sponge::Sponge;
+use crate::table::{Bucket, Entry, Table};
 
 /// A lock-free, concurrent hash map.
-pub struct NestedMap<K: Hash + Eq, V> {
+pub struct NestedMap<K: Hash + Eq + Display, V> {
     /// The root table of the hash map.
     root: Table<K, V>,
 }
 
-impl<'a, K: 'a + Hash + Eq, V: 'a> Default for NestedMap<K, V> {
+impl<'a, K: 'a + Hash + Eq + Display, V: 'a> Default for NestedMap<K, V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a, K:'a + Hash + Eq, V> NestedMap<K, V> {
+impl<'a, K: 'a + Hash + Eq + Display, V> NestedMap<K, V> {
     pub fn new() -> Self {
         Self {
-            root: Table::default()
+            root: Table::default(),
         }
     }
 
     /// Lookups a key.
-    pub fn lookup(&'a self, key: &K, guard: &'a Guard) -> Option<&V>
-    {
+    pub fn lookup(&'a self, key: &K, guard: &'a Guard) -> Option<&V> {
         self.root.lookup(key, Sponge::new(&key), guard)
     }
 
@@ -56,9 +56,13 @@ impl<'a, K:'a + Hash + Eq, V> NestedMap<K, V> {
     pub fn insert(&self, key: K, val: V, guard: &Guard) -> Option<V> {
         let mut sponge = Sponge::new(&key);
         self.root.insert(
-            Owned::new(Bucket::Leaf(Entry{key, value: Some(val)})).into_shared(guard), 
+            Owned::new(Bucket::Leaf(Entry {
+                key,
+                value: Some(val),
+            }))
+            .into_shared(guard),
             &mut sponge,
-            guard
+            guard,
         )
     }
 
@@ -69,4 +73,3 @@ impl<'a, K:'a + Hash + Eq, V> NestedMap<K, V> {
         self.root.delete(key, &mut Sponge::new(&key), guard)
     }
 }
-
