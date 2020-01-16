@@ -123,7 +123,7 @@ impl<'a, K:'a + Hash + Eq, V: 'a> Table<K, V> {
                             return table.insert(entry, sponge, guard);
                         },
                         Bucket::Leaf(entry2) =>  {
-                            if unsafe{ entry.into_owned() }.get_key().unwrap() == &entry2.key {
+                            if unsafe{ entry.deref() }.get_key().unwrap() == &entry2.key {
                                 match self.buckets[index].compare_and_set(
                                     bucket,
                                     entry,
